@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "autogluon>=1.4.0",
+    "geopandas>=1.1.1",
     "ipywidgets>=8.1.8",
     "matplotlib>=3.10.7",
     "numpy>=1.26.0,<2.2",
@@ -13,4 +14,9 @@ dependencies = [
     "pandas>=2.0.0,<2.3",
     "scikit-learn>=1.5.0,<1.7",
     "seaborn>=0.13.2",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
 ]
