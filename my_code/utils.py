@@ -35,3 +35,37 @@ def drop_cols(df, drop_cols=[], threshold=1):
     df = df.drop(columns=drop_cols)
     
     return df
+
+
+def nearest_merge(gdf_a, gdf_b, geom_col_a='geometry', geom_col_b='geometry', threshold=None):
+    """
+    GeoDataFrame AのそれぞれのジオメトリーについてGeoDataFrame Bの最も近いジオメトリーをマージする。
+    距離が閾値以上の場合はBの列をNULLでマージ。
+    
+    Parameters:
+    gdf_a (gpd.GeoDataFrame): ベースとなるGeoDataFrame
+    gdf_b (gpd.GeoDataFrame): マージ元のGeoDataFrame
+    geom_col_a (str): gdf_aのジオメトリー列名
+    geom_col_b (str): gdf_bのジオメトリー列名
+    threshold (float): 距離の閾値。この値以上の距離の場合はマッチ無しとする
+    
+    Returns:
+    gpd.GeoDataFrame: マージされたGeoDataFrame
+    """
+    # 元のgeometry列を一時的に設定
+    gdf_a = gdf_a.set_geometry(geom_col_a)
+    gdf_b = gdf_b.set_geometry(geom_col_b)
+    
+    # 空間インデックスを使用して最近傍を検索
+    nearest = gdf_a.sjoin_nearest(gdf_b, how='left', distance_col='_distance', max_distance=threshold)
+    
+    # 重複する列名を処理(index_rightを除外し、Bのカラムのみを保持)
+    b_cols = [col for col in gdf_b.columns if col != geom_col_b]
+    result_cols = list(gdf_a.columns) + b_cols + ['_distance']
+    
+    # index_rightを使ってBのデータをマージ
+    if 'index_right' in nearest.columns:
+        nearest = nearest.merge(gdf_b[b_cols], left_on='index_right', right_index=True, how='left', suffixes=('', '_b'))
+        nearest = nearest.drop(columns=['index_right'])
+    
+    return nearest
