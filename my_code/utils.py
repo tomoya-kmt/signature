@@ -1,7 +1,7 @@
 import pandas as pd
 import geopandas as gpd
 
-def convert_to_geodataframe(df, lon_col='lon', lat_col='lat', crs='EPSG:4326'):
+def convert_to_geodataframe(df, lon_col='lon', lat_col='lat', crs='EPSG:6668'):
     """
     経度と緯度の列を持つpandas DataFrameをGeoDataFrameに変換します。
 
@@ -52,20 +52,22 @@ def nearest_merge(gdf_a, gdf_b, geom_col_a='geometry', geom_col_b='geometry', th
     Returns:
     gpd.GeoDataFrame: マージされたGeoDataFrame
     """
+
+    gdf_b["geometry_b"] = gdf_b[geom_col_b]
+    
     # 元のgeometry列を一時的に設定
     gdf_a = gdf_a.set_geometry(geom_col_a)
     gdf_b = gdf_b.set_geometry(geom_col_b)
     
+    # 投影座標系に変換(日本測地系2011/UTM zone 54N)
+    gdf_a_proj = gdf_a.to_crs('EPSG:6691')
+    gdf_b_proj = gdf_b.to_crs('EPSG:6691')
+    
     # 空間インデックスを使用して最近傍を検索
-    nearest = gdf_a.sjoin_nearest(gdf_b, how='left', distance_col='_distance', max_distance=threshold)
+    nearest = gdf_a_proj.sjoin_nearest(gdf_b_proj, how='left', distance_col='distance', max_distance=threshold)
     
-    # 重複する列名を処理(index_rightを除外し、Bのカラムのみを保持)
-    b_cols = [col for col in gdf_b.columns if col != geom_col_b]
-    result_cols = list(gdf_a.columns) + b_cols + ['_distance']
-    
-    # index_rightを使ってBのデータをマージ
-    if 'index_right' in nearest.columns:
-        nearest = nearest.merge(gdf_b[b_cols], left_on='index_right', right_index=True, how='left', suffixes=('', '_b'))
-        nearest = nearest.drop(columns=['index_right'])
+    # 元の座標系に戻す
+    nearest = nearest.to_crs(gdf_a.crs)
+    nearest = nearest.drop(columns=['index_right'])
     
     return nearest
