@@ -1,3 +1,5 @@
 # データフォルダを除外
 *.csv
+*.geojson
+*.xml
 my_code/AutoGluonModels/
