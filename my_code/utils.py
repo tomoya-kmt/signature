@@ -66,8 +66,8 @@ def nearest_merge(
     gdf_b = gdf_b.set_geometry(geom_col_b)
 
     # 投影座標系に変換(日本測地系2011/UTM zone 54N)
-    gdf_a_proj = gdf_a.to_crs("EPSG:6691")
-    gdf_b_proj = gdf_b.to_crs("EPSG:6691")
+    gdf_a_proj = gdf_a.to_crs("EPSG:6677")
+    gdf_b_proj = gdf_b.to_crs("EPSG:6677")
 
     # 空間インデックスを使用して最近傍を検索
     nearest = gdf_a_proj.sjoin_nearest(
