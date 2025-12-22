@@ -117,6 +117,7 @@ def spatial_join(
         lsuffix=lsuffix,
         rsuffix=rsuffix,
     )
+    result = result[~result.index.duplicated(keep='first')]
 
     return result
 
