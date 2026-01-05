@@ -65,6 +65,12 @@ def nearest_merge(
     gdf_a = gdf_a.set_geometry(geom_col_a)
     gdf_b = gdf_b.set_geometry(geom_col_b)
 
+    # index_right列が既に存在する場合は削除
+    if "index_right" in gdf_a.columns:
+        gdf_a = gdf_a.drop(columns=["index_right"])
+    if "index_right" in gdf_b.columns:
+        gdf_b = gdf_b.drop(columns=["index_right"])
+
     # 投影座標系に変換(日本測地系2011/UTM zone 54N)
     gdf_a_proj = gdf_a.to_crs("EPSG:6677")
     gdf_b_proj = gdf_b.to_crs("EPSG:6677")
@@ -103,21 +109,30 @@ def spatial_join(
     Returns:
     gpd.GeoDataFrame: 空間結合されたGeoDataFrame
     """
+    # 左のデータフレームに一時的なID列を追加
+    gdf_left_copy = gdf_left.copy()
+    gdf_left_copy['_temp_id'] = range(len(gdf_left_copy))
+    
     # CRSが一致しているか確認
-    if gdf_left.crs != gdf_right.crs:
-        print(f"Warning: CRSが異なります。gdf_right を {gdf_left.crs} に変換します。")
-        gdf_right = gdf_right.to_crs(gdf_left.crs)
+    if gdf_left_copy.crs != gdf_right.crs:
+        print(f"Warning: CRSが異なります。gdf_right を {gdf_left_copy.crs} に変換します。")
+        gdf_right = gdf_right.to_crs(gdf_left_copy.crs)
 
     # 空間結合を実行
     result = gpd.sjoin(
-        gdf_left,
+        gdf_left_copy,
         gdf_right,
         how=how,
         predicate=predicate,
         lsuffix=lsuffix,
         rsuffix=rsuffix,
     )
-    result = result[~result.index.duplicated(keep='first')]
+    
+    # 一時ID列で重複を削除（最初の行を保持）
+    result = result.drop_duplicates(subset=['_temp_id'], keep='first')
+    
+    # 一時ID列を削除
+    result = result.drop(columns=['_temp_id'])
 
     return result
 
