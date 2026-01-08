@@ -3,6 +3,7 @@ import geopandas as gpd
 from pathlib import Path
 from typing import Optional, List
 from joblib import Parallel, delayed
+import re
 
 def convert_to_geodataframe(df, lon_col="lon", lat_col="lat", crs="EPSG:6668"):
     """
@@ -209,3 +210,162 @@ def merge_geojson_files(folder_path: str) -> Optional[gpd.GeoDataFrame]:
     print(f"結合完了: 合計 {len(merged_gdf)} 件のフィーチャー")
     
     return merged_gdf
+
+def merge_lag_features(
+    df_a: pd.DataFrame,
+    df_b: pd.DataFrame,
+    join_key: str,
+    col_year_map: dict[str, int]
+) -> pd.DataFrame:
+    """
+    データフレームAに対し、データフレームB（横持ち）から過去5年分のラグ特徴量を結合する。
+
+    データフレームBは事前に指定されたカラム名と年のマッピング辞書に基づいて
+    縦持ち（Long format）に変換され、その後結合される。
+
+    Parameters
+    ----------
+    df_a : pd.DataFrame
+        ベースとなるデータフレーム。'target_ym'列（YYYYMM形式の整数または文字列、あるいはdatetime）を含む必要がある。
+    df_b : pd.DataFrame
+        年ごとのデータが横持ちで保存されているデータフレーム。
+    join_key : str
+        df_a と df_b を結合するためのキーとなるカラム名（例: ユーザーIDや地域コードなど）。
+    col_year_map : dict[str, int]
+        df_bのカラム名と、それが表す西暦年の対応辞書。
+        例: {'L02_050': 2020, 'L02_051': 2021, ...}
+
+    Returns
+    -------
+    pd.DataFrame
+        過去5年分のラグ特徴量（lag_1_val ~ lag_5_val）が結合された新しいデータフレーム。
+
+    """
+    # データのコピー（元のデータフレームに影響を与えないため）
+    df_result = df_a.copy()
+    
+    # 1. df_aのtarget_ymから「年」を抽出するための処理
+    # target_ymがdatetime型の場合
+    if pd.api.types.is_datetime64_any_dtype(df_result['target_ym']):
+        df_result['_current_year'] = df_result['target_ym'].dt.year
+    # target_ymが数値（202304など）や文字列の場合
+    else:
+        # 文字列に変換してから先頭4文字を取得して数値化
+        df_result['_current_year'] = df_result['target_ym'].astype(str).str[:4].astype(int)
+
+    # 2. df_bを縦持ち（Long format）に変換
+    # mapに含まれるカラムのみを抽出してmeltする
+    target_cols = list(col_year_map.keys())
+    
+    # id_varsにjoin_keyを指定し、value_varsに年のカラムを指定
+    df_b_long = df_b.melt(
+        id_vars=[join_key],
+        value_vars=target_cols,
+        var_name='_col_name',
+        value_name='_value'
+    )
+    
+    # カラム名を実際の「年」に変換
+    df_b_long['_data_year'] = df_b_long['_col_name'].map(col_year_map)
+    
+    # 結合用に不要なカラムを削除
+    df_b_prepared = df_b_long[[join_key, '_data_year', '_value']]
+
+    # 3. 過去5年分のデータをループで結合
+    for i in range(1, 6):
+        lag_year_col = f'_join_year_lag_{i}'
+        feature_name = f'lag_{i}_val'
+        
+        # 結合するための基準年（現在の年 - i年）を計算
+        df_result[lag_year_col] = df_result['_current_year'] - i
+        
+        # マージ処理
+        # 左：df_result (キー: join_key, lag_year_col)
+        # 右：df_b_prepared (キー: join_key, _data_year)
+        df_result = pd.merge(
+            df_result,
+            df_b_prepared,
+            left_on=[join_key, lag_year_col],
+            right_on=[join_key, '_data_year'],
+            how='left'
+        )
+        
+        # カラム名の整理
+        df_result = df_result.rename(columns={'_value': feature_name})
+        
+        # マージに使った一時的なカラムを削除（_data_yearは右側のキーなのでマージ後に残る場合があるため削除）
+        if '_data_year' in df_result.columns:
+            df_result = df_result.drop(columns=['_data_year'])
+        df_result = df_result.drop(columns=[lag_year_col])
+
+    # 最終的な後処理（計算に使った一時カラムの削除）
+    df_result = df_result.drop(columns=['_current_year'])
+    
+    return df_result
+
+
+def generate_year_mapping(
+    base_year: int,
+    base_col_name: str,
+    num_years: int,
+    start_offset: int = -10
+) -> dict[str, int]:
+    """
+    基準となる年とカラム名から、カラム名と西暦年のマッピング辞書を生成する。
+    
+    カラム名の末尾3桁を数値として扱い、基準年からの増減に合わせて西暦を割り当てる。
+    前回のラグ特徴量生成（過去データの参照）に対応するため、デフォルトでは
+    基準年の10年前からマッピングを開始する設定としている。
+
+    Parameters
+    ----------
+    base_year : int
+        基準となる西暦年（例: 2020）。
+    base_col_name : str
+        基準年におけるカラム名（例: 'L02_050'）。末尾が3桁の数字であることを前提とする。
+    num_years : int
+        生成するマッピングの総年数（カラム数）。
+    start_offset : int, optional
+        基準年から何年離れた地点から生成を開始するか（デフォルトは -10）。
+        -10の場合、基準年の10年前から生成を開始する。
+
+    Returns
+    -------
+    dict[str, int]
+        {'カラム名': 西暦年} の形式の辞書。
+        例: {'L02_040': 2010, ..., 'L02_050': 2020, ...}
+
+    Raises
+    ------
+    ValueError
+        base_col_nameの末尾が3桁の数字でない場合に発生。
+
+    """
+    # 正規表現で末尾の3桁の数字とそれ以前のプレフィックスを分離
+    match = re.search(r'^(.*)(\d{3})$', base_col_name)
+    if not match:
+        raise ValueError(f"カラム名 '{base_col_name}' の末尾に3桁の数字が見つかりません。")
+
+    prefix = match.group(1)      # 例: "L02_"
+    base_suffix = int(match.group(2)) # 例: 50
+
+    mapping = {}
+
+    # start_offset から num_years 分だけループを回す
+    # 例: offset=-10, num=20 の場合、基準-10年 ～ 基準+9年 までを生成
+    for i in range(start_offset, start_offset + num_years):
+        # 年の計算
+        target_year = base_year + i
+        
+        # 末尾3桁の数字を計算
+        target_suffix = base_suffix + i
+        
+        # 3桁より小さくなる（負になる）場合は考慮外とするか、データの仕様に合わせてエラー処理が必要
+        # ここでは単純に0埋め3桁としてフォーマットする
+        if target_suffix < 0:
+            continue # 負のサフィックスは生成しない
+            
+        col_name = f"{prefix}{target_suffix:03}"
+        mapping[col_name] = target_year
+
+    return mapping
