@@ -215,6 +215,7 @@ def merge_lag_features(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
     join_key: str,
+    prefix: str,
     col_year_map: dict[str, int]
 ) -> pd.DataFrame:
     """
@@ -274,7 +275,7 @@ def merge_lag_features(
     # 3. 過去5年分のデータをループで結合
     for i in range(1, 6):
         lag_year_col = f'_join_year_lag_{i}'
-        feature_name = f'lag_{i}_val'
+        feature_name = f'lag_{i}_val_{prefix}'
         
         # 結合するための基準年（現在の年 - i年）を計算
         df_result[lag_year_col] = df_result['_current_year'] - i
@@ -369,3 +370,134 @@ def generate_year_mapping(
         mapping[col_name] = target_year
 
     return mapping
+
+def join_nearest_with_conditions(
+    gdf_base: gpd.GeoDataFrame,
+    gdf_target: gpd.GeoDataFrame,
+    match_col: str,
+    max_dist: float,
+    distance_col_name: str = "distance",
+    target_crs: str = "EPSG:6677"
+) -> gpd.GeoDataFrame:
+    """
+    指定されたカラムの値が一致するグループ内で、距離が最も近く、かつ閾値以内のジオメトリを結合します。
+    ベースデータの全行を維持し、条件に合致するデータがない場合はNULLを埋めます(Left Join)。
+
+    Parameters
+    ----------
+    gdf_base : gpd.GeoDataFrame
+        ベースとなるデータフレーム（Geometry: Point想定）。
+    gdf_target : gpd.GeoDataFrame
+        結合対象のデータフレーム（Geometry: MultiLineString想定）。
+    match_col : str
+        両方のデータフレームに存在し、結合条件（等価）となるカラム名。
+    max_dist : float
+        結合を許可する最大距離。target_crsで指定した単位（メートル等）になります。
+    target_crs : Optional[Union[str, int]], default None
+        距離計算を行うための投影座標系（例: "EPSG:6677"）。
+        指定された場合、結合前にこの座標系へ変換します。
+    distance_col_name : str, default "distance"
+        結果に含まれる距離情報のカラム名。
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        ベースデータの行数が維持されたデータフレーム。
+        結合条件を満たさない行の結合先カラムにはNaNが入ります。
+        ベース1行につきターゲット最大1行（m:1）となります。
+    """
+    
+    # --- 1. 前処理: CRS変換とID付与 ---
+    # 元データを変更しないようコピー
+    base_process = gdf_base.copy()
+    target_process = gdf_target.copy()
+
+    # CRS変換
+    if target_crs is not None:
+        if base_process.crs is None or target_process.crs is None:
+            raise ValueError("CRS変換を行うには、入力データフレームにCRSが定義されている必要があります。")
+        base_process = base_process.to_crs(target_crs)
+        target_process = target_process.to_crs(target_crs)
+    elif base_process.crs != target_process.crs:
+        target_process = target_process.to_crs(base_process.crs)
+
+    # 確実にマージするために一時的なユニークIDを付与
+    temp_id_col = "_temp_join_id"
+    base_process[temp_id_col] = range(len(base_process))
+    
+    # --- 2. グループごとの最近傍結合 (Inner Logic) ---
+    common_keys = set(base_process[match_col]) & set(target_process[match_col])
+    results = []
+
+    # カラム名の衝突回避用サフィックス
+    lsuffix = ""
+    rsuffix = "_target"
+
+    for key in common_keys:
+        # IDによるフィルタリング
+        sub_base = base_process[base_process[match_col] == key]
+        sub_target = target_process[target_process[match_col] == key]
+        
+        if sub_base.empty or sub_target.empty:
+            continue
+            
+        try:
+            # ここでは条件に合うものだけを取得（Inner Join）
+            joined = gpd.sjoin_nearest(
+                sub_base,
+                sub_target,
+                how="inner", 
+                max_distance=max_dist,
+                distance_col=distance_col_name,
+                lsuffix=lsuffix,
+                rsuffix=rsuffix
+            )
+            results.append(joined)
+        except Exception as e:
+            print(f"Key {key} の処理中にエラーが発生しました: {e}")
+
+    # --- 3. 結合結果の集約と重複排除 (m:1の保証) ---
+    if results:
+        matched_df = pd.concat(results, ignore_index=True)
+        
+        # 距離が近い順、同じならデータの並び順でソート
+        matched_df = matched_df.sort_values(by=[temp_id_col, distance_col_name])
+        
+        # ベース側のID(temp_id_col)ごとに最初の1件だけを残す
+        matched_df = matched_df.drop_duplicates(subset=[temp_id_col], keep='first')
+        
+        # --- 4. ベースデータへの左結合 (Left Join) ---
+        # ベースデータに含まれないカラム（ターゲット由来のカラム + 距離カラム）を特定
+        base_cols = set(base_process.columns)
+        matched_cols = set(matched_df.columns)
+        # temp_id_colは結合キーとして必要なので除外しない
+        new_cols = list((matched_cols - base_cols) | {temp_id_col})
+        
+        # 必要カラムのみを抽出したデータフレームを作成
+        df_to_merge = matched_df[new_cols]
+        
+        # 一時IDを使って左結合
+        final_gdf = pd.merge(
+            base_process,
+            df_to_merge,
+            on=temp_id_col,
+            how='left'
+        )
+    else:
+        # マッチしたものが一つもない場合は、カラムだけ追加（全行NaN）するか、そのまま返す
+        # ここでは距離カラムなどをNaNで追加して返す
+        final_gdf = base_process.copy()
+        final_gdf[distance_col_name] = float('nan')
+        # ターゲット側のカラム構造が不明なため、最低限距離カラムのみ追加して返します
+        # 必要であればここでgdf_targetのカラムをNaNで追加する処理を入れられます
+
+    # --- 5. 後処理 ---
+    # 一時IDの削除
+    if temp_id_col in final_gdf.columns:
+        final_gdf = final_gdf.drop(columns=[temp_id_col])
+    
+    # マージ操作でGeoDataFrameの属性が失われる場合があるため再設定
+    if not isinstance(final_gdf, gpd.GeoDataFrame):
+        final_gdf = gpd.GeoDataFrame(final_gdf, geometry=base_process.geometry.name, crs=base_process.crs)
+
+    return final_gdf
